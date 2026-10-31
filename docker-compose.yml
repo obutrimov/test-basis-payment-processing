@@ -1,0 +1,98 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: payment_postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: payment_rabbitmq
+    ports:
+      - "5672:5672"  # AMQP
+      - "15672:15672" # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build: .
+    container_name: payment_api
+    command: >
+      sh -c "poetry run alembic upgrade head &&
+             poetry run uvicorn src.api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  consumer:
+    build: .
+    container_name: payment_consumer
+    command: poetry run faststream run src.consumer.main:app
+    restart: on-failure
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  relay:
+    build: .
+    container_name: payment_relay
+    command: poetry run python -m src.relay.main
+    restart: on-failure
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  webhook-receiver:
+    build: .
+    container_name: payment_webhook_receiver
+    command: poetry run uvicorn src.devtools.webhook_receiver:app --host 0.0.0.0 --port 9000
+    ports:
+      - "9000:9000"
+    env_file: .env
+
+  test:
+    build: .
+    container_name: payment_test
+    profiles: ["test"]
+    command: >
+      sh -c "poetry run ruff check . &&
+             poetry run ruff format --check . &&
+             poetry run pytest"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
